@@ -1,0 +1,9 @@
+1. Escriure als 7seg el valor dels switchos
+2. Programa que calculi la successió de fibonacci
+3. Programa que ompli tota la memoria de '1'
+4. Programa que calculi la divisió entre els numeros del switch i mostri el resultat pels 7seg
+5. Dent de serra als LEDs
+6. Comptador als 7seg
+7. Calcul del CRC d'un bloc de memòria de 1kb.
+8. Calcular π
+9. Calcular ln(2)

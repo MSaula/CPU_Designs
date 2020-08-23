@@ -1,0 +1,254 @@
+--------------------------------------------
+-- Author:            Miquel Saula
+-- Last modification: 3/08/2020
+--------------------------------------------
+
+Library ieee;
+USE ieee.std_logic_1164.all;
+USE ieee.std_logic_unsigned.all;
+USE ieee.numeric_std.all;
+
+entity parallel_division_module is
+    generic (
+        -- System
+        SD: integer:= 32;
+        SX: integer:= 17;
+        SB: integer:= 5;
+
+        -- Instruction
+        IO: integer:= 4;
+        IX: integer:= 2;
+        IY: integer:= 11;
+
+        -- Floating Point
+        FD: integer:= 32;
+        FM: integer:= 23;
+        FE: integer:= 8;
+
+        BC: integer:= 8
+    );
+    port (
+        clk: in std_logic;
+        reset: in std_logic;
+
+        start: in std_logic;
+        RDin: in std_logic_vector(SB-1 downto 0);
+        IsFP: in std_logic;
+
+        N: in std_logic_vector(FD-1 downto 0);
+        D: in std_logic_vector(FD-1 downto 0);
+
+        C: out std_logic_vector(FD-1 downto 0);
+
+        FPUfull: out std_logic;
+
+        -- OoOE Bus
+        ACK0: in std_logic;
+        Q0: out std_logic_vector(FD-1 downto 0);
+        RD0: out std_logic_vector(SB-1 downto 0);
+        END0: out std_logic;
+        IFP0: out std_logic;
+
+        ACK1: in std_logic;
+        Q1: out std_logic_vector(FD-1 downto 0);
+        RD1: out std_logic_vector(SB-1 downto 0);
+        END1: out std_logic;
+        IFP1: out std_logic;
+
+        ACK2: in std_logic;
+        Q2: out std_logic_vector(FD-1 downto 0);
+        RD2: out std_logic_vector(SB-1 downto 0);
+        END2: out std_logic;
+        IFP2: out std_logic;
+
+        ACK3: in std_logic;
+        Q3: out std_logic_vector(FD-1 downto 0);
+        RD3: out std_logic_vector(SB-1 downto 0);
+        END3: out std_logic;
+        IFP3: out std_logic;
+
+        ACK4: in std_logic;
+        Q4: out std_logic_vector(FD-1 downto 0);
+        RD4: out std_logic_vector(SB-1 downto 0);
+        END4: out std_logic;
+        IFP4: out std_logic;
+
+        ACK5: in std_logic;
+        Q5: out std_logic_vector(FD-1 downto 0);
+        RD5: out std_logic_vector(SB-1 downto 0);
+        END5: out std_logic;
+        IFP5: out std_logic;
+
+        ACK6: in std_logic;
+        Q6: out std_logic_vector(FD-1 downto 0);
+        RD6: out std_logic_vector(SB-1 downto 0);
+        END6: out std_logic;
+        IFP6: out std_logic;
+
+        ACK7: in std_logic;
+        Q7: out std_logic_vector(FD-1 downto 0);
+        RD7: out std_logic_vector(SB-1 downto 0);
+        END7: out std_logic;
+        IFP7: out std_logic
+    );
+end parallel_division_module;
+
+architecture a of parallel_division_module is
+
+    component fp_divider is
+        generic (
+            FD: integer:= 32;
+            FM: integer:= 23;
+            FE: integer:= 8
+        );
+        port (
+            Nin: in std_logic_vector(FD-1 downto 0);
+            Din: in std_logic_vector(FD-1 downto 0);
+
+            start: in std_logic;
+            clk: in std_logic;
+
+
+            Q: out std_logic_vector(FD-1 downto 0);
+
+            ended: out std_logic
+    	);
+    end component;
+
+    component division_scheduler is
+        generic (
+            SB: integer:= 5;
+            BC: integer:= 8
+        );
+        port (
+            clk: in std_logic;
+            reset: in std_logic;
+            start: in std_logic;
+            RDin: in std_logic_vector(SB+1-1 downto 0);
+
+            ACK: in std_logic_vector(BC-1 downto 0);
+            AVA: in std_logic_vector(BC-1 downto 0);
+
+            start_vector: out std_logic_vector(BC-1 downto 0);
+
+            RD0: out std_logic_vector(SB+1-1 downto 0);
+            RD1: out std_logic_vector(SB+1-1 downto 0);
+            RD2: out std_logic_vector(SB+1-1 downto 0);
+            RD3: out std_logic_vector(SB+1-1 downto 0);
+            RD4: out std_logic_vector(SB+1-1 downto 0);
+            RD5: out std_logic_vector(SB+1-1 downto 0);
+            RD6: out std_logic_vector(SB+1-1 downto 0);
+            RD7: out std_logic_vector(SB+1-1 downto 0);
+
+            FPUfull: out std_logic
+    	);
+    end component;
+
+    type RD_MATRIX is array (BC-1 downto 0) of std_logic_vector(SB+1-1 downto 0);
+    type Q_MATRIX is array (BC-1 downto 0) of std_logic_vector(SD-1 downto 0);
+
+    signal rdm: RD_MATRIX;
+    signal qm: Q_MATRIX;
+    signal start_vector: std_logic_vector(BC-1 downto 0);
+    signal end_vector: std_logic_vector(BC-1 downto 0);
+    signal ack_vector: std_logic_vector(BC-1 downto 0);
+    signal av: std_logic_vector(BC-1 downto 0);
+
+    signal RDfull: std_logic_vector(SB+1-1 downto 0);
+
+begin
+  
+    c <= (others => '0');
+
+    RD0 <= rdm(0)(SB-1 downto 0);
+    RD1 <= rdm(1)(SB-1 downto 0);
+    RD2 <= rdm(2)(SB-1 downto 0);
+    RD3 <= rdm(3)(SB-1 downto 0);
+    RD4 <= rdm(4)(SB-1 downto 0);
+    RD5 <= rdm(5)(SB-1 downto 0);
+    RD6 <= rdm(6)(SB-1 downto 0);
+    RD7 <= rdm(7)(SB-1 downto 0);
+
+    IFP0 <= rdm(0)(SB);
+    IFP1 <= rdm(1)(SB);
+    IFP2 <= rdm(2)(SB);
+    IFP3 <= rdm(3)(SB);
+    IFP4 <= rdm(4)(SB);
+    IFP5 <= rdm(5)(SB);
+    IFP6 <= rdm(6)(SB);
+    IFP7 <= rdm(7)(SB);
+
+    Q0 <= qm(0);
+    Q1 <= qm(1);
+    Q2 <= qm(2);
+    Q3 <= qm(3);
+    Q4 <= qm(4);
+    Q5 <= qm(5);
+    Q6 <= qm(6);
+    Q7 <= qm(7);
+
+    ack_vector(0) <= ACK0;
+    ack_vector(1) <= ACK1;
+    ack_vector(2) <= ACK2;
+    ack_vector(3) <= ACK3;
+    ack_vector(4) <= ACK4;
+    ack_vector(5) <= ACK5;
+    ack_vector(6) <= ACK6;
+    ack_vector(7) <= ACK7;
+
+    END0 <= end_vector(0) and not av(0);
+    END1 <= end_vector(1) and not av(1);
+    END2 <= end_vector(2) and not av(2);
+    END3 <= end_vector(3) and not av(3);
+    END4 <= end_vector(4) and not av(4);
+    END5 <= end_vector(5) and not av(5);
+    END6 <= end_vector(6) and not av(6);
+    END7 <= end_vector(7) and not av(7);
+    
+    RDfull <= (IsFP & RDin);
+
+    division_modules_declaration: for i in BC-1 downto 0 generate
+        DM: fp_divider
+        generic map (
+            FD => FD,
+            FM => FM,
+            FE => FE
+        )
+        port map (
+            Nin => N,
+            Din => D,
+
+            start => start_vector(i),
+            clk => clk,
+
+            Q => qm(i),
+
+            ended => end_vector(i)
+        );
+    end generate;
+
+    DS: division_scheduler
+    generic map (
+        SB => SB,
+        BC => BC
+    )
+    port map (
+        clk => clk,
+        reset => reset,
+        start => start,
+        RDin => RDfull,
+        ACK => ack_vector,
+        start_vector => start_vector,
+        RD0 => rdm(0),
+        RD1 => rdm(1),
+        RD2 => rdm(2),
+        RD3 => rdm(3),
+        RD4 => rdm(4),
+        RD5 => rdm(5),
+        RD6 => rdm(6),
+        RD7 => rdm(7),
+        FPUfull => FPUfull,
+        AVA => av
+    );
+
+end a;

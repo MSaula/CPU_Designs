@@ -1,0 +1,643 @@
+--------------------------------------------
+-- Author:            Miquel Saula
+-- Last modification: 3/08/2020
+--------------------------------------------
+
+Library ieee;
+USE ieee.std_logic_1164.all;
+USE ieee.std_logic_unsigned.all;
+USE ieee.numeric_std.all;
+
+entity write_back_module is
+    generic (
+        -- System
+        SB: integer:= 5;
+        SD: integer:= 32;
+        SX: integer:= 17;
+
+        -- Instruction
+        IO: integer:= 4;
+        IX: integer:= 2;
+        IY: integer:= 11;
+
+        FD: integer:= 32;
+        BC: integer:= 8
+    );
+    port (
+        clk: in std_logic;
+        reset: in std_logic;
+        WB_Stall: in std_logic;
+        ID_Stall: in std_logic;
+        reset_fifo: in std_logic;
+
+        rs: in std_logic_vector(SB-1 downto 0);
+        rt: in std_logic_vector(SB-1 downto 0);
+        rd: in std_logic_vector(SB-1 downto 0);
+
+        NewValue: in std_logic_vector(SD-1 downto 0);
+        DecodeOpcode: in std_logic_vector(SX-1 downto 0);
+
+        R1: out std_logic_vector(SD-1 downto 0);
+        R2: out std_logic_vector(SD-1 downto 0);
+
+        SrcNotReady: out std_logic;
+        InOOEM: out std_logic;
+
+        BPIDQ: in std_logic_vector(SD-1 downto 0);
+        BPIDRD: in std_logic_vector(SB-1 downto 0);
+        BPIDIFP: in std_logic;
+        BPIDNFI: in std_logic;
+
+        BPEXEQ: in std_logic_vector(SD-1 downto 0);
+        BPEXERD: in std_logic_vector(SB-1 downto 0);
+        BPEXEIFP: in std_logic;
+        BPEXENFI: in std_logic;
+
+        -- OUT OF ORDER EXECUTION BUS
+        ACK0: out std_logic;
+        Q0: in std_logic_vector(FD-1 downto 0);
+        RD0: in std_logic_vector(SB-1 downto 0);
+        END0: in std_logic;
+        IFP0: in std_logic;
+
+        ACK1: out std_logic;
+        Q1: in std_logic_vector(FD-1 downto 0);
+        RD1: in std_logic_vector(SB-1 downto 0);
+        END1: in std_logic;
+        IFP1: in std_logic;
+
+        ACK2: out std_logic;
+        Q2: in std_logic_vector(FD-1 downto 0);
+        RD2: in std_logic_vector(SB-1 downto 0);
+        END2: in std_logic;
+        IFP2: in std_logic;
+
+        ACK3: out std_logic;
+        Q3: in std_logic_vector(FD-1 downto 0);
+        RD3: in std_logic_vector(SB-1 downto 0);
+        END3: in std_logic;
+        IFP3: in std_logic;
+
+        ACK4: out std_logic;
+        Q4: in std_logic_vector(FD-1 downto 0);
+        RD4: in std_logic_vector(SB-1 downto 0);
+        END4: in std_logic;
+        IFP4: in std_logic;
+
+        ACK5: out std_logic;
+        Q5: in std_logic_vector(FD-1 downto 0);
+        RD5: in std_logic_vector(SB-1 downto 0);
+        END5: in std_logic;
+        IFP5: in std_logic;
+
+        ACK6: out std_logic;
+        Q6: in std_logic_vector(FD-1 downto 0);
+        RD6: in std_logic_vector(SB-1 downto 0);
+        END6: in std_logic;
+        IFP6: in std_logic;
+
+        ACK7: out std_logic;
+        Q7: in std_logic_vector(FD-1 downto 0);
+        RD7: in std_logic_vector(SB-1 downto 0);
+        END7: in std_logic;
+        IFP7: in std_logic
+	);
+end write_back_module;
+
+architecture a of write_back_module is
+
+    component wb_fifo is
+        generic (
+            -- System
+            SB: integer:= 5;
+            SD: integer:= 32;
+            SX: integer:= 17;
+
+            -- Instruction
+            IO: integer:= 4;
+            IX: integer:= 2;
+            IY: integer:= 11
+        );
+        port (
+            clk: in std_logic;
+            reset: in std_logic;
+            wb_stall: in std_logic;
+            id_stall: in std_logic;
+
+            -- Main INPUTS
+            rd: in std_logic_vector(SB-1 downto 0);
+            op: in std_logic_vector(SX-1 downto 0);
+
+            -- Secondary INPUTS
+            rs: in std_logic_vector(SB-1 downto 0);
+            rt: in std_logic_vector(SB-1 downto 0);
+
+            -- OUTPUTS
+            rd_out: out std_logic_vector(SB-1 downto 0);
+            op_out: out std_logic_vector(SX-1 downto 0);
+
+            SrcNotReady: out std_logic
+
+    	);
+    end component;
+
+    type STORAGE is array ((2**SB)-1 downto 0) of std_logic_vector(SD-1 downto 0);
+
+    signal GPBR: STORAGE := (others => (others => '0'));
+    signal FPBR: STORAGE := (others => (others => '0'));
+
+    signal r1_isFloat: boolean;
+    signal r2_isFloat: boolean;
+    signal r2_isD: boolean;
+
+    signal wb_isFloat: boolean;
+    signal wb_needsWB: boolean;
+
+    signal op: std_logic_vector(IO-1 downto 0) := (others => '0');
+    signal flag: std_logic_vector(IX-1 downto 0) := (others => '0');
+    signal flag2: std_logic_vector(IY-1 downto 0) := (others => '0');
+
+    signal B: std_logic_vector(SD-1 downto 0) := (others => '0');
+    signal D: std_logic_vector(SD-1 downto 0) := (others => '0');
+
+    signal LIFO_error: std_logic;
+
+    signal wb_rd: std_logic_vector(SB-1 downto 0) := (others => '0');
+    signal wb_instruction: std_logic_vector(SX-1 downto 0) := (others => '0');
+
+    signal rfifo: std_logic;
+
+
+    -- OOE Signals
+
+    type DEPENDENCIES_MATRIX is array ((2*(2**SB))-1 downto 0) of std_logic_vector((2*(2**SB))-1 downto 0);
+    type RD_MATRIX is array (BC-1 downto 0) of std_logic_vector(SB-1 downto 0);
+    type Q_MATRIX is array (BC-1 downto 0) of std_logic_vector(SD-1 downto 0);
+
+    signal dep: DEPENDENCIES_MATRIX;
+    signal NFIV: std_logic_vector((2*(2**SB))-1 downto 0);
+    signal IsNFI: boolean;
+    signal OOEM: boolean;
+    signal CIF: boolean;
+
+    signal GPBRaux: STORAGE := (others => (others => '0'));
+    signal FPBRaux: STORAGE := (others => (others => '0'));
+
+    signal SrcOnPipeline: std_logic;
+    signal SrcOnOOEM: std_logic;
+
+    signal DRRS: boolean; -- Decode Requires Rs
+    signal DRRT: boolean; -- Decode Requires Rt
+    signal DRRD: boolean; -- Decode Requires Rd
+
+    signal RSIF: boolean; -- Rs is float
+    signal RTIF: boolean; -- Rs is float
+    signal RDIF: boolean; -- Rs is float
+
+    -- Bus
+    signal ACKV: std_logic_vector(BC-1 downto 0);
+    signal ENDV: std_logic_vector(BC-1 downto 0);
+    signal QM: Q_MATRIX;
+    signal RDM: RD_MATRIX;
+    signal IFPV: std_logic_vector(BC-1 downto 0);
+
+    signal zeros: std_logic_vector((2*(2**SB))-1 downto 0) := (others => '0');
+
+    signal SOOEMNR: boolean;-- Source in Out of Order Execution Mode Not Ready
+    signal BypassSelector: integer;
+
+    signal ra: integer := 0;
+    signal rb: integer := 0;
+    signal rag: integer := 0;
+    signal rbg: integer := 0;
+
+    signal ra_in_bpid: boolean;
+    signal rb_in_bpid: boolean;
+
+    signal ra_in_bpexe: boolean;
+    signal rb_in_bpexe: boolean;
+
+    signal ra_in_bpmem: boolean;
+    signal rb_in_bpmem: boolean;
+
+    signal ra_in_ooeb: boolean;
+    signal rb_in_ooeb: boolean;
+
+    signal ra_in_ooem: boolean;
+    signal rb_in_ooem: boolean;
+
+    signal BPOOEB_Qa: std_logic_vector(SD-1 downto 0);
+    signal BPOOEB_Qb: std_logic_vector(SD-1 downto 0);
+
+    signal SNR: std_logic;
+
+begin
+
+    IsNFI <= ((wb_instruction(IO-1 downto 0) = "0000") and (wb_instruction(IO+IX-1 downto IO) = "10") and (wb_instruction(IO+IX+IY-1 downto IO+IX) = "00000000011"));-- or
+             -- (wb_instruction(IO-1 downto 1) = "011");
+
+    OOEM <= NFIV /= zeros;
+    InOOEM <= '1' when OOEM else '0';
+
+    op <= DecodeOpcode(IO-1 downto 0);
+    flag <= DecodeOpcode(IX+IO-1 downto IO);
+    flag2 <= DecodeOpcode(IY+IX+IO-1 downto IO+IX);
+
+    r1_isFloat <= ((op = "0100") and (flag = "00")) or
+        ((op = "0000") and (flag = "10")) or
+        ((op = "0101") and (flag = "10") and (flag2 = "00000000001")) or
+        ((op = "1101") and (flag(IX-1) = '1'));
+
+    r2_isFloat <= ((op = "0100") and (flag = "00")) or
+        ((op = "0000") and (flag = "10")) or
+        ((op = "0101") and (flag = "10") and (flag2 = "00000000001")) or
+        ((op = "1101") and (flag(IX-1) = '1')) or
+        ((op = "1000") and (flag = "11"));
+
+    r2_isD <= (op = "1000") or (op = "0010") or (op = "1101");
+
+    ra <= to_integer(unsigned(rs));
+    rb <= to_integer(unsigned(rd)) when r2_isD else to_integer(unsigned(rt));
+    rag <= ra + 2**SB when r1_isFloat else ra;
+    rbg <= rb + 2**SB when r2_isFloat else rb;
+
+    ra_in_bpid <= rag = to_integer(unsigned(BPIDIFP & BPIDRD)) and BPIDNFI = '0' and BPIDRD /= "00000";
+    rb_in_bpid <= rbg = to_integer(unsigned(BPIDIFP & BPIDRD)) and BPIDNFI = '0' and BPIDRD /= "00000";
+
+    ra_in_bpexe <= rag = to_integer(unsigned(BPEXEIFP & BPEXERD)) and BPEXENFI = '0' and BPEXERD /= "00000";
+    rb_in_bpexe <= rbg = to_integer(unsigned(BPEXEIFP & BPEXERD)) and BPEXENFI = '0' and BPEXERD /= "00000";
+
+    ra_in_bpmem <= (rag = to_integer(unsigned('1' & wb_rd))) when wb_isFloat else (rag = to_integer(unsigned(wb_rd))) and wb_rd /= "00000";
+    rb_in_bpmem <= (rbg = to_integer(unsigned('1' & wb_rd))) when wb_isFloat else (rbg = to_integer(unsigned(wb_rd))) and wb_rd /= "00000";
+
+    R1 <= BPIDQ when ra_in_bpid else
+          BPEXEQ when ra_in_bpexe else
+          NewValue when ra_in_bpmem else
+          BPOOEB_Qa when ra_in_ooeb else
+          FPBRaux(ra) when ra_in_ooem and r1_isFloat else
+          GPBRaux(ra) when ra_in_ooem and not r1_isFloat else
+          FPBR(ra) when r1_isFloat else
+          GPBR(ra);
+
+    R2 <= BPIDQ when rb_in_bpid else
+          BPEXEQ when rb_in_bpexe else
+          NewValue when rb_in_bpmem else
+          BPOOEB_Qb when rb_in_ooeb else
+          FPBRaux(rb) when rb_in_ooem and r2_isFloat else
+          GPBRaux(rb) when rb_in_ooem and not r2_isFloat else
+          FPBR(rb) when r2_isFloat else
+          GPBR(rb);
+
+
+    rfifo <= reset or reset_fifo;
+
+    FIFO: wb_fifo
+    generic map (
+        SB => SB,
+        SD => SD,
+        SX => SX,
+
+        IO => IO,
+        IX => IX,
+        IY => IY
+    ) port map (
+        clk => clk,
+        reset => rfifo,
+        wb_stall => WB_Stall,
+        id_stall => ID_Stall,
+        rd => rd,
+        op => DecodeOpcode,
+        rs => rs,
+        rt => rt,
+        rd_out => wb_rd,
+        op_out => wb_instruction,
+        SrcNotReady => SrcOnPipeline
+    );
+
+    SNR <= '1' when SrcOnPipeline = '1' or SOOEMNR else '0';--SrcOnOOEM;
+    SrcNotReady <= SNR;
+
+    wb_isFloat <=
+        ((wb_instruction(IO-1 downto 0) = "0100") and (wb_instruction(5 downto 4) = "01")) or
+        ((wb_instruction(IO-1 downto 0) = "0111") and (wb_instruction(5 downto 4) = "11")) or
+        ((wb_instruction(IO-1 downto 0) = "0000") and (wb_instruction(5 downto 4) = "10"));
+
+    wb_needsWB <=
+        (wb_instruction(IO-1 downto 0) = "0000") or
+        (wb_instruction(IO-1 downto 0) = "0001") or
+        (wb_instruction(IO-1 downto 0) = "0010") or
+        (wb_instruction(IO-1 downto 0) = "0011") or
+        (wb_instruction(IO-1 downto 0) = "0100") or
+        (wb_instruction(IO-1 downto 0) = "0101") or
+        (wb_instruction(IO-1 downto 0) = "0110") or
+        (wb_instruction(IO-1 downto 0) = "0111") or
+        (wb_instruction(IO-1 downto 0) = "1111");
+
+    CIF_Update: process(RDM, ENDV, wb_rd, wb_isFloat)
+        variable aux: boolean;
+    begin
+        aux := false;
+        for i in BC-1 downto 0 loop
+            if (wb_isFloat) then
+                if (wb_rd = RDM(i)) then
+                    aux := (ENDV(i) = '1');
+                end if;
+            else
+                if (wb_rd = RDM(i)) then
+                    aux := ENDV(i) = '1';
+                end if;
+            end if;
+        end loop;
+        CIF <= aux;
+    end process;
+
+    DRRS <= not (op = "0010" or op = "1100");
+
+    DRRT <= not (op = "0111" or op = "0110" or op = "1000" or op = "0100" or
+                 (op = "0000" and flag = "01") or
+                 (op = "0001" and (flag2 = "00000000011" or flag2 = "00000000100")) or
+                 op = "0010" or op = "1100" or op = "1101");
+
+    DRRD <= op = "1000" or op = "0010" or op = "1101";
+
+    RSIF <= DRRS and ((op = "0100" and flag = "00") or
+                      (op = "0000" and flag = "10") or
+                      (op = "0101" and flag = "10") or
+                      (op = "1101" and flag(IX-1) = '1'));
+
+    RTIF <= DRRT and ((op = "0000" and flag = "10") or (op = "0101" and flag = "10"));
+
+    RDIF <= DRRD and (op = "1000" and flag = "11");
+
+    updateSNR_OOE: process(dep)
+        variable coincidence: std_logic;
+    begin
+        coincidence := '0';
+
+        if (DRRS and not RSIF) then
+            if (dep(to_integer(unsigned(rs))) /= zeros) then coincidence := '1'; end if;
+        end if;
+        if (DRRT and not RTIF) then
+            if (dep(to_integer(unsigned(rt))) /= zeros) then coincidence := '1'; end if;
+        end if;
+        if (DRRD and not RDIF) then
+            if (dep(to_integer(unsigned(rd))) /= zeros) then coincidence := '1'; end if;
+        end if;
+        if (DRRS and RSIF) then
+            if (dep(to_integer(unsigned(rs)) + 2**SB) /= zeros) then coincidence := '1'; end if;
+        end if;
+        if (DRRT and RTIF) then
+            if (dep(to_integer(unsigned(rt)) + 2**SB) /= zeros) then coincidence := '1'; end if;
+        end if;
+        if (DRRD and RDIF) then
+            if (dep(to_integer(unsigned(rd)) + 2**SB) /= zeros) then coincidence := '1'; end if;
+        end if;
+
+        SrcOnOOEM <= coincidence;
+    end process;
+
+    OOEProcess: process(clk, reset)
+        variable rd_global: integer;
+        variable depaux: DEPENDENCIES_MATRIX;
+        variable NFIVaux: std_logic_vector(2*(2**SB)-1 downto 0);
+        variable GPBRprev: STORAGE;
+        variable FPBRprev: STORAGE;
+    begin
+        depaux := dep;
+        GPBRprev := GPBRaux;
+        FPBRprev := FPBRaux;
+
+        if (wb_isFloat) then rd_global := to_integer(unsigned(wb_rd)) + (2**SB);
+        else rd_global := to_integer(unsigned(wb_rd)); end if;
+
+        if (reset = '1') then
+            NFIV <= (others => '0');
+            depaux := (others => (others => '0'));
+            ACKV <= (others => '0');
+        elsif (clk = '1' and clk'event and wb_needsWB and WB_Stall = '0') then
+            if (IsNFI) then
+                NFIVaux := NFIV;
+                if (not CIF) then
+                    NFIVaux(rd_global) := '1';
+                    NFIV(rd_global) <= '1';
+                    depaux(rd_global) := NFIVaux;
+                end if;
+            else
+                if (OOEM) then
+                    if (wb_isFloat) then
+                        FPBRprev(to_integer(unsigned(wb_rd))) := NewValue;
+                    else
+                        GPBRprev(to_integer(unsigned(wb_rd))) := NewValue;
+                    end if;
+                    depaux(rd_global) := NFIV;
+                else
+                    if (wb_isFloat) then
+                        FPBR(to_integer(unsigned(wb_rd))) <= NewValue;
+                    else
+                        GPBR(to_integer(unsigned(wb_rd))) <= NewValue;
+                    end if;
+                end if;
+            end if;
+        end if;
+
+        if (reset = '0' and clk = '1' and clk'event) then
+            for i in BC-1 downto 0 loop
+                if (ENDV(i) = '1') then
+                    ACKV(i) <= '1';
+                    if (rd_global = (IFPV(i) & RDM(i))) then
+                        if (OOEM) then
+                            if (IFPV(i) = '0') then GPBRprev(to_integer(unsigned(RDM(i)))) := QM(i);
+                        else FPBRprev(to_integer(unsigned(RDM(i)))) := QM(i); end if;
+                            depaux(to_integer(unsigned(IFPV(i) & RDM(i)))) := NFIV;
+                        else
+                            if (IFPV(i) = '0') then GPBR(to_integer(unsigned(RDM(i)))) <= QM(i);
+                            else FPBR(to_integer(unsigned(RDM(i)))) <= QM(i); end if;
+                        end if;
+                    else
+                        if (NFIV(to_integer(unsigned(IFPV(i) & RDM(i)))) = '1') then
+                            if (IFPV(i) = '0') then GPBRprev(to_integer(unsigned(RDM(i)))) := QM(i);
+                            else FPBRprev(to_integer(unsigned(RDM(i)))) := QM(i); end if;
+                            for j in (2*(2**SB))-1 downto 0 loop depaux(j)(to_integer(unsigned(IFPV(i) & RDM(i)))) := '0'; end loop;
+                            NFIV(to_integer(unsigned(IFPV(i) & RDM(i)))) <= '0';
+                        end if;
+                    end if;
+                else
+                    ACKV(i) <= '0';
+                end if;
+            end loop;
+
+            for i in 2*(2**SB)-1 downto 0 loop
+                if (dep(i) /= zeros and depaux(i) = zeros) then
+                    if (i >= 2**SB) then
+                        FPBR(i-(2**SB)) <= FPBRprev(i-(2**SB));
+                    else
+                        GPBR(i) <= GPBRprev(i);
+                    end if;
+                end if;
+            end loop;
+        end if;
+
+        GPBRaux <= GPBRprev;
+        FPBRaux <= FPBRprev;
+        dep <= depaux;
+    end process;
+
+    checkSOOOEMNR: process(op, OOEM, RDM, ENDV, IFPV, rt, rs, rd, NFIV, r1_isFloat, r2_isFloat)
+        variable coincidence: boolean;
+    begin
+        coincidence := false;
+        if (OOEM) then
+            if (not (op = "0010" or op = "1100")) then
+                if r1_isFloat then
+                    if (NFIV(to_integer(unsigned('1' & rs))) = '1') then
+                        for i in BC-1 downto 0 loop
+                            if (RDM(i) = rs and ENDV(i) /= '1' and IFPV(i) = '1') then
+                                coincidence := true;
+                            end if;
+                        end loop;
+                    end if;
+                else
+                    if (NFIV(to_integer(unsigned(rs))) = '1') then
+                        for i in BC-1 downto 0 loop
+                            if (RDM(i) = rs and ENDV(i) /= '1' and IFPV(i) = '0') then
+                                coincidence := true;
+                            end if;
+                        end loop;
+                    end if;
+                end if;
+            end if;
+
+            if (not (op = "0010" or op = "1100" or op = "1000" or op = "0111" or op = "0110" or op = "0100" or op = "0010")) then
+                if r2_isFloat then
+                    if (NFIV(to_integer(unsigned('1' & rt))) = '1') then
+                        for i in BC-1 downto 0 loop
+                            if (RDM(i) = rt and ENDV(i) /= '1' and IFPV(i) = '1') then
+                                coincidence := true;
+                            end if;
+                        end loop;
+                    end if;
+                else
+                    if (NFIV(to_integer(unsigned(rt))) = '1') then
+                        for i in BC-1 downto 0 loop
+                            if (RDM(i) = rt and ENDV(i) /= '1' and IFPV(i) = '0') then
+                                coincidence := true;
+                            end if;
+                        end loop;
+                    end if;
+                end if;
+            end if;
+
+            if (op = "1101" or op = "1100" or op = "0010" or op = "1000") then
+                if r2_isFloat then
+                    if (NFIV(to_integer(unsigned('1' & rd))) = '1') then
+                        for i in BC-1 downto 0 loop
+                            if (RDM(i) = rd and ENDV(i) /= '1' and IFPV(i) = '1') then
+                                coincidence := true;
+                            end if;
+                        end loop;
+                    end if;
+                else
+                    if (NFIV(to_integer(unsigned(rd))) = '1') then
+                        for i in BC-1 downto 0 loop
+                            if (RDM(i) = rd and ENDV(i) /= '1' and IFPV(i) = '0') then
+                                coincidence := true;
+                            end if;
+                        end loop;
+                    end if;
+                end if;
+            end if;
+        end if;
+        SOOEMNR <= coincidence;
+    end process;
+
+    Rx_on_OOEM: process (OOEM, NFIV, rag, rbg, RDM, IFPV, ENDV)
+        variable ra_in_ooeb_aux: boolean;
+        variable rb_in_ooeb_aux: boolean;
+        variable ra_in_ooem_aux: boolean;
+        variable rb_in_ooem_aux: boolean;
+    begin
+        ra_in_ooeb_aux := false;
+        rb_in_ooeb_aux := false;
+        ra_in_ooem_aux := false;
+        rb_in_ooem_aux := false;
+
+        if (OOEM) then
+            if (NFIV(rag) = '1') then
+                for i in BC-1 downto 0 loop
+                    if (rag = to_integer(unsigned(IFPV(i) & RDM(i))) and ENDV(i) = '1') then
+                        ra_in_ooeb_aux := true;
+                        BPOOEB_Qa <= QM(i);
+                    end if;
+                end loop;
+            else
+                if (dep(rag) /= zeros) then
+                    ra_in_ooem_aux := true;
+                end if;
+            end if;
+
+            if (NFIV(rbg) = '1') then
+                for i in BC-1 downto 0 loop
+                    if (rbg = to_integer(unsigned(IFPV(i) & RDM(i))) and ENDV(i) = '1') then
+                        rb_in_ooeb_aux := true;
+                        BPOOEB_Qb <= QM(i);
+                    end if;
+                end loop;
+            else
+                if (dep(rbg) /= zeros) then
+                    rb_in_ooem_aux := true;
+                end if;
+            end if;
+        end if;
+
+        ra_in_ooeb <= ra_in_ooeb_aux;
+        rb_in_ooeb <= rb_in_ooeb_aux;
+        ra_in_ooem <= ra_in_ooem_aux;
+        rb_in_ooem <= rb_in_ooem_aux;
+    end process;
+
+    IFPV(0) <= IFP0;
+    IFPV(1) <= IFP1;
+    IFPV(2) <= IFP2;
+    IFPV(3) <= IFP3;
+    IFPV(4) <= IFP4;
+    IFPV(5) <= IFP5;
+    IFPV(6) <= IFP6;
+    IFPV(7) <= IFP7;
+
+    ENDV(0) <= END0;
+    ENDV(1) <= END1;
+    ENDV(2) <= END2;
+    ENDV(3) <= END3;
+    ENDV(4) <= END4;
+    ENDV(5) <= END5;
+    ENDV(6) <= END6;
+    ENDV(7) <= END7;
+
+    RDM(0) <= RD0;
+    RDM(1) <= RD1;
+    RDM(2) <= RD2;
+    RDM(3) <= RD3;
+    RDM(4) <= RD4;
+    RDM(5) <= RD5;
+    RDM(6) <= RD6;
+    RDM(7) <= RD7;
+
+    QM(0) <= Q0;
+    QM(1) <= Q1;
+    QM(2) <= Q2;
+    QM(3) <= Q3;
+    QM(4) <= Q4;
+    QM(5) <= Q5;
+    QM(6) <= Q6;
+    QM(7) <= Q7;
+
+    ACK0 <= ACKV(0);
+    ACK1 <= ACKV(1);
+    ACK2 <= ACKV(2);
+    ACK3 <= ACKV(3);
+    ACK4 <= ACKV(4);
+    ACK5 <= ACKV(5);
+    ACK6 <= ACKV(6);
+    ACK7 <= ACKV(7);
+
+end a;
